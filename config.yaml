@@ -1,0 +1,169 @@
+# ============================================================================
+# config.yaml  --  Single source of truth for the entire study.
+#
+# Paper: "Urban-Rural Governance Transparency: A Multi-Agent System Approach
+#         to Enhancing Citizen Satisfaction"  (Expert Systems With Applications)
+#
+# Every path, hyperparameter, and random seed used anywhere in src/ is declared
+# here. No magic numbers live in the code. Changing an experiment means editing
+# this file, not the source -- this is what makes the study reproducible.
+#
+# Keys marked "[optional]" have a built-in default in the source (read via
+# .get()); they are listed here so every knob is visible in one place and the
+# reproducibility appendix is complete. Removing one falls back to its default.
+# ============================================================================
+
+project:
+  name: "urban-rural-governance-mas"
+  seed: 42                       # global master seed; per-run seeds derive from it
+  n_seeds: 5                     # independent repetitions for every learning method
+
+# ----------------------------------------------------------------------------
+# Paths (relative to the project root). Stages read/write only through these.
+# ----------------------------------------------------------------------------
+paths:
+  raw_data: "data/raw/R9_Merge_39ctry_20Nov23_final__release_Updated_4Jun25-3.sav"
+  processed_dir: "data/processed"
+  analysis_frame: "data/processed/analysis_frame.parquet"
+  calibration: "data/processed/calibration.json"
+  results_logs: "results/logs"
+  results_tables: "results/tables"
+  results_figures: "results/figures"
+
+# ----------------------------------------------------------------------------
+# DATA PIPELINE
+# Construct -> Afrobarometer Round 9 variable map. VERIFIED against the uploaded
+# .sav header and the Merged Round 9 codebook (June 2024). The three transparency
+# items Q35A/B/C are the paper's core construct: three distinct disclosure
+# CHANNELS, not one transparency dial.
+#
+# ITEM ORIENTATION: every variable below is assumed to be coded so that a
+# HIGHER value is MORE FAVOURABLE (more transparency / trust / better service /
+# higher satisfaction). `corruption` is the sole exception and the loader takes
+# its complement (integrity = 1 - corruption). Confirm each item's direction
+# against the Round 9 codebook before reporting results -- a reversed item
+# silently sign-flips its calibrated marginal effect.
+# ----------------------------------------------------------------------------
+data:
+  var_map:
+    stratum:        "URBRUR"            # 1=Urban, 2=Rural, 3=Peri-urban
+    country:        "COUNTRY"           # 2..40 (39 countries)
+    region:         "REGION"            # sub-national province/region
+    weight:         "Combinwt_new_hh"   # cross-national comparison weight
+    # --- outcome: citizen satisfaction (two items, averaged, rescaled 0-100) ---
+    satisfaction:   ["Q31", "Q47C"]     # Q31 satisfaction w/ democracy;
+                                        # Q47C approval of local councillor
+    # --- THE THREE TRANSPARENCY CHANNELS (the paper's central construct) ------
+    transparency_channels:
+      budget_school:    "Q35A"          # access: local school budget
+      budget_localgov:  "Q35B"          # access: local-government dev. plan/budget
+      contracts:        "Q35C"          # access: government contract
+    # --- mediating governance constructs -------------------------------------
+    service:        ["Q46G", "Q46I"]    # handling health + water/sanitation
+    trust:          "Q37D"              # trust in elected local govt council
+    corruption:     "Q38D"              # corruption of local councillors
+    # --- individual controls -------------------------------------------------
+    controls:       ["Q1", "Q94", "Q100", "LPI"]   # age, education, gender, poverty
+  # Afrobarometer missing / DK / refused codes (verified against codebook).
+  missing_codes: [-1, 7, 8, 9, 98, 99, 998, 999, 9995, 9998, 9999]
+  min_country_n: 300                    # drop countries with too few valid rows
+                                        # (used by BOTH data_pipeline and the
+                                        #  per-country calibration threshold)
+  synthetic_n: 6000                     # rows for the synthetic fallback dataset
+
+# ----------------------------------------------------------------------------
+# CALIBRATION
+# Channel-resolved satisfaction-response model. The headline model is POOLED
+# (all 39 countries); per-country models feed the cross-country robustness sweep.
+# ----------------------------------------------------------------------------
+calibration:
+  ridge_lambda: 1.0                     # L2 penalty (intercept unregularised)
+  gbm_crosscheck: true                  # fit a GBM to report non-linear R^2
+  per_country: true                     # also fit one model per country
+  bootstrap_iters: 400                  # bootstrap CIs for marginal effects
+  # GBM cross-check hyperparameters [optional]. The cross-check is a robustness
+  # statistic only -- never consumed by the simulation. CV is shuffled+seeded.
+  gbm_n_estimators: 200                 # [optional] default 200
+  gbm_max_depth: 3                      # [optional] default 3
+  gbm_cv_folds: 4                       # [optional] default 4
+
+# ----------------------------------------------------------------------------
+# ENVIRONMENT
+# Government agents allocate a scarce budget across the THREE transparency
+# channels in their jurisdiction. The action is a PORTFOLIO, not a scalar.
+# ----------------------------------------------------------------------------
+environment:
+  n_urban: 4
+  n_rural: 4
+  citizens_per_jurisdiction: 120
+  horizon: 24                           # decision rounds per episode
+                                        # (episode end = horizon truncation, not
+                                        #  an absorbing terminal; learners
+                                        #  bootstrap the value at the boundary)
+  budget: 6.0                           # shared common-pool transparency budget
+  n_channels: 3                         # Q35A/B/C -- must equal len(CHANNELS)
+  allocation_levels: 4                  # discrete request levels per channel
+  effectiveness: 0.30                   # funds -> disclosure conversion
+  decay: 0.30                           # natural erosion of disclosure per round
+  social_influence: 0.25                # weight of neighbour satisfaction
+  network_degree: 6                     # citizen social-network neighbours
+  lambda_equity: 0.6                    # weight on the urban-rural gap penalty
+  reward_mix: 0.6                       # local vs global welfare blend
+  # Transition constants [optional] -- defaults reproduce the original dynamics.
+  satisfaction_inertia: 0.7             # [optional] own-state weight in the
+                                        #   satisfaction update (vs 0.3 on the
+                                        #   calibrated channel drive); default 0.7
+  citizen_sat_init_std: 0.12            # [optional] s.d. of citizen satisfaction
+                                        #   at episode reset; default 0.12
+
+# ----------------------------------------------------------------------------
+# ALGORITHMS
+# Baselines + the two learners. MAPPO (centralised agent-specific critic,
+# equity-aware, per-agent difference-reward) is the contribution; Tabular IQL
+# is the reproducible reference baseline that isolates the value of the
+# coordination mechanism.
+# ----------------------------------------------------------------------------
+algorithms:
+  baselines: ["uniform", "urban_biased", "rural_biased", "greedy_need"]
+
+  tabular_iql:
+    episodes: 600
+    alpha: 0.15
+    gamma: 0.95
+    eps_start: 1.0
+    eps_min: 0.05
+    eps_decay: 0.995
+
+  mappo:
+    episodes: 1500
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_eps: 0.2
+    lr_actor: 3.0e-4
+    lr_critic: 1.0e-3
+    hidden_dim: 128
+    update_epochs: 4
+    entropy_coef: 0.01
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    device: "auto"                      # auto -> cuda if available else cpu
+    # MAPPO refinements [optional] -- defaults are behaviour-preserving.
+    value_norm: true                    # [optional] online value-target
+                                        #   normalisation; default true
+    episodes_per_update: 1              # [optional] episodes per PPO update;
+                                        #   default 1 (raise for lower-variance
+                                        #   updates; episode budget unchanged)
+
+# ----------------------------------------------------------------------------
+# EXPERIMENTS
+# The protocol: main comparison, ablations, sensitivity, robustness.
+# ----------------------------------------------------------------------------
+experiments:
+  eval_episodes: 50                     # episodes averaged at evaluation
+  lambda_equity_sweep: [0.0, 0.3, 0.6, 0.9, 1.2]
+  ablations:
+    channel_resolved: [true, false]     # 3-channel portfolio vs single dial
+    coordination: ["difference", "naive"]
+  robustness_countries: 8               # # of per-country runs in the sweep
+  robustness_seeds: 3                   # [optional] seeds per country in E5
+                                        #   (capped by project.n_seeds); default 3
